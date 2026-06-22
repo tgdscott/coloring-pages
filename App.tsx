@@ -3,9 +3,9 @@ import { Header } from './components/Header';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
 import { Spinner } from './components/Spinner';
-import { generateColoringPage, ColoringPageResult } from './services/geminiService';
+import { generateColoringPage, ColoringPageResult, getSavedGeminiApiKey, saveGeminiApiKey } from './services/geminiService';
 import { AppState } from './types';
-import { RefreshCw, Download, Trash2, Edit2, ScanLine, Type, Eraser, Sparkles, MessageSquarePlus } from 'lucide-react';
+import { RefreshCw, Download, Trash2, Edit2, ScanLine, Type, Eraser, Sparkles, MessageSquarePlus, KeyRound } from 'lucide-react';
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.UPLOAD);
@@ -18,6 +18,7 @@ const App: React.FC = () => {
   
   // User custom instructions
   const [customInstruction, setCustomInstruction] = useState<string>('');
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => getSavedGeminiApiKey());
   
   const [error, setError] = useState<string | null>(null);
 
@@ -34,13 +35,14 @@ const App: React.FC = () => {
     setError(null);
 
     try {
+      saveGeminiApiKey(geminiApiKey);
       const resultData = await generateColoringPage(originalImage, 'image/jpeg', customInstruction);
       setResults(resultData);
       setViewMode('cleanedUp'); // Default to the guide version
       setAppState(AppState.RESULT);
     } catch (err) {
       console.error(err);
-      setError("Failed to generate the coloring page. Please try again with a different image or simpler sketch.");
+      setError(err instanceof Error ? err.message : "Failed to generate the coloring page. Please try again with a different image or simpler sketch.");
       setAppState(AppState.PREVIEW);
     }
   };
@@ -141,6 +143,24 @@ const App: React.FC = () => {
                       rows={3}
                     />
                   </div>
+
+                  <div className="w-full">
+                    <label className="flex items-center gap-2 text-sm font-semibold text-slate-700 mb-2">
+                      <KeyRound size={16} className="text-indigo-500"/>
+                      Gemini API Key
+                    </label>
+                    <input
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={(e) => setGeminiApiKey(e.target.value)}
+                      placeholder="Needed for GitHub Pages demos"
+                      autoComplete="off"
+                      className="w-full p-3 text-sm border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none bg-slate-50/50 hover:bg-white transition-all placeholder:text-slate-400"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
+                      Stored only in this browser. GitHub Pages is static, so this keeps demo keys out of the public bundle.
+                    </p>
+                  </div>
                   
                   <div className="flex flex-col w-full gap-3">
                     <Button onClick={handleGenerate} className="w-full shadow-indigo-200 shadow-lg" icon={<ScanLine />}>
@@ -176,10 +196,10 @@ const App: React.FC = () => {
                 <p className="text-slate-500">Select your preferred style below.</p>
               </div>
               <div className="flex gap-3">
-                 <Button variant="outline" onClick={handleReset} icon={<RefreshCw size={16}/>}>
+                 <Button variant="outline" onClick={handleReset} icon={<RefreshCw size={16}/>}> 
                    New Scan
                  </Button>
-                 <Button onClick={handleDownload} icon={<Download size={16}/>}>
+                 <Button onClick={handleDownload} icon={<Download size={16}/>}> 
                    Download Image
                  </Button>
               </div>

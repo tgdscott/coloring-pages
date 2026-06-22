@@ -1,0 +1,8 @@
+{
+  "name": "Doodle Coloring Pages",
+  "description": "Transform your rough sketches into clean, beautiful black and white coloring book pages using AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

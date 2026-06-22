@@ -1,10 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
-
-export interface ColoringPageResult {
-  withText: string;
-  withoutText: string;
-  cleanedUp: string;
-}
+import { GoogleGenAI } from "@google/genai";
 
 const GEMINI_API_KEY_STORAGE_KEY = 'coloring_pages_gemini_api_key';
 
@@ -37,57 +31,32 @@ export const saveGeminiApiKey = (apiKey: string): void => {
   }
 };
 
-const getConfiguredApiKey = (): string => {
-  return getSavedGeminiApiKey() || getBuildTimeApiKey();
-};
-
-const getAIClient = (): GoogleGenAI => {
-  const apiKey = getConfiguredApiKey();
-
+const getAiClient = () => {
+  const apiKey = getSavedGeminiApiKey() || getBuildTimeApiKey();
   if (!apiKey) {
-    throw new Error(
-      'A Gemini API key is required for generation on GitHub Pages. Enter a key in the preview screen and try again.'
-    );
+    throw new Error("A Gemini API key is required for generation on GitHub Pages. Enter one in the preview screen and try again.");
   }
-
   return new GoogleGenAI({ apiKey });
 };
 
-const stripDataUrlPrefix = (dataUrl: string): string => {
-  return dataUrl.replace(/^data:image\/\w+;base64,/, '');
-};
-
-const detectMimeType = (dataUrl: string, fallback: string): string => {
-  const match = dataUrl.match(/^data:(image\/[^;]+);base64,/);
-  return match?.[1] || fallback;
-};
-
-const makePrompt = (variant: keyof ColoringPageResult, customInstruction?: string): string => {
-  const shared = `Convert the uploaded sketch or photo into clean black-and-white printable coloring book line art.
-Use a pure white background, bold clean outlines, no grayscale shading, no color, no hatching, no stippling, no texture, no photographic shadows, and no messy debris.
-Keep the main subject recognizable and simplify details into large enclosed areas suitable for coloring.`;
-
-  const instructionText = customInstruction?.trim()
-    ? `\n\nUser instructions to follow if reasonable: ${customInstruction.trim()}`
-    : '';
-
-  if (variant === 'withText') {
-    return `${shared}\nPreserve visible text, labels, signs, or lettering from the original when they appear important.${instructionText}`;
+const cleanBase64 = (base64Str: string): string => {
+  if (base64Str.includes(',')) {
+    return base64Str.split(',')[1];
   }
-
-  if (variant === 'withoutText') {
-    return `${shared}\nRemove visible text, labels, signs, and lettering. Replace those areas with clean line art or white space.${instructionText}`;
-  }
-
-  return `${shared}\nCreate the cleanest guide version: remove visible text, simplify clutter, strengthen the main outlines, and make the result look like a polished coloring page template.${instructionText}`;
+  return base64Str;
 };
 
-const generateVariant = async (
-  ai: GoogleGenAI,
-  imageDataUrl: string,
-  fallbackMimeType: string,
-  variant: keyof ColoringPageResult,
-  customInstruction?: string
+export interface ColoringPageResult {
+  withText: string;
+  withoutText: string;
+  cleanedUp: string;
+}
+
+const generateImage = async (
+  ai: GoogleGenAI, 
+  base64Data: string, 
+  mimeType: string, 
+  prompt: string
 ): Promise<string> => {
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash-image',
@@ -95,49 +64,134 @@ const generateVariant = async (
       parts: [
         {
           inlineData: {
-            mimeType: detectMimeType(imageDataUrl, fallbackMimeType),
-            data: stripDataUrlPrefix(imageDataUrl),
+            mimeType: mimeType,
+            data: base64Data,
           },
         },
         {
-          text: makePrompt(variant, customInstruction),
+          text: prompt
         },
       ],
     },
-    config: {
-      imageConfig: {
-        aspectRatio: '1:1',
-      },
-    },
   });
 
-  const parts = response.candidates?.[0]?.content?.parts || [];
-  for (const part of parts) {
-    if (part.inlineData?.data) {
-      const mimeType = part.inlineData.mimeType || 'image/png';
-      return `data:${mimeType};base64,${part.inlineData.data}`;
+  if (response.candidates?.[0]?.content?.parts) {
+    for (const part of response.candidates[0].content.parts) {
+      if (part.inlineData) {
+        return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+      }
     }
   }
+  throw new Error("No image generated");
+};
 
-  throw new Error('Gemini did not return an image. Try a simpler or clearer source image.');
+const preprocessImage = async (
+  ai: GoogleGenAI,
+  base64Data: string,
+  mimeType: string
+): Promise<string> => {
+  // Updated to be conditional so it doesn't hallucinate "paper" on real photos
+  const prompt = `
+    TASK: IMAGE PREPARATION & GEOMETRY CORRECTION
+    INPUT: An image (could be a photo of a sketch, or a direct photo of a scene).
+    
+    INSTRUCTIONS:
+    1. **ANALYZE**: Look at the image content. Is this a photo of a physical piece of paper lying on a surface (desk, floor)?
+    
+    2. **IF PAPER DETECTED**:
+       - CROP to the edges of the paper. Remove the desk/background.
+       - FLATTEN the perspective (orthographic view).
+       
+    3. **IF NO PAPER DETECTED** (e.g. a photo of people, a landscape, or a digital image):
+       - KEEP the image exactly as is.
+       - DO NOT crop out the subjects.
+       - DO NOT warp the perspective.
+    
+    OUTPUT: The prepared image, ready for line-art conversion.
+  `;
+  return generateImage(ai, base64Data, mimeType, prompt);
 };
 
 export const generateColoringPage = async (
-  imageDataUrl: string,
-  mimeType: string,
-  customInstruction?: string
+  base64Image: string, 
+  mimeType: string = 'image/jpeg',
+  customInstruction: string = ''
 ): Promise<ColoringPageResult> => {
-  const ai = getAIClient();
+  try {
+    const ai = getAiClient();
+    const originalCleanData = cleanBase64(base64Image);
 
-  const [withText, withoutText, cleanedUp] = await Promise.all([
-    generateVariant(ai, imageDataUrl, mimeType, 'withText', customInstruction),
-    generateVariant(ai, imageDataUrl, mimeType, 'withoutText', customInstruction),
-    generateVariant(ai, imageDataUrl, mimeType, 'cleanedUp', customInstruction),
-  ]);
+    // STEP 1: Pre-process (Crop & Flatten ONLY if it's a sketch)
+    let workingBase64 = originalCleanData;
+    try {
+      const flattenedImage = await preprocessImage(ai, originalCleanData, mimeType);
+      workingBase64 = cleanBase64(flattenedImage);
+    } catch (error) {
+      console.warn("Preprocessing failed. Proceeding with original image.", error);
+    }
 
-  return {
-    withText,
-    withoutText,
-    cleanedUp,
-  };
+    // STEP 2: Generate Variations
+    // Prompts updated to include custom user instructions which override defaults
+
+    const promptTrace = `
+      TASK: HIGH FIDELITY LINE ART
+      - The input is an image.
+      - Convert it to a detailed black-and-white line drawing (coloring page style).
+      
+      USER CUSTOM INSTRUCTION (IMPORTANT OVERRIDE):
+      ${customInstruction ? `"${customInstruction}" - PRIORITIZE THIS INSTRUCTION.` : "None."}
+      
+      RULES:
+      - **FIDELITY IS PARAMOUNT**: Trace the visual edges EXACTLY. 
+      - **IF PHOTO**: Do not "cartoonize" or "characterize" the people. Outline their actual features, clothes, and poses as they appear. Use an "edge detection" approach.
+      - **IF SKETCH**: Trace the existing lines exactly.
+      - **STYLE**: Pure BLACK lines on Pure WHITE background. NO FILLS.
+      ${customInstruction ? `- **MODIFICATION**: Apply the user's custom instruction to the subject matter.` : ''}
+    `;
+
+    const promptNoText = `
+      TASK: LINE ART - NO TEXT
+      - Convert input to black-and-white line art.
+      - **REMOVE** any handwritten or printed text, captions, or speech bubbles. Leave those areas blank (white).
+      - **KEEP** all other visual subjects (people, objects, drawings).
+      
+      USER CUSTOM INSTRUCTION (IMPORTANT OVERRIDE):
+      ${customInstruction ? `"${customInstruction}" - PRIORITIZE THIS INSTRUCTION.` : "None."}
+
+      RULES:
+      - **FIDELITY**: Maintain the exact look of the non-text elements.
+      - **STYLE**: Pure BLACK lines on Pure WHITE background.
+      ${customInstruction ? `- **MODIFICATION**: Apply the user's custom instruction.` : ''}
+    `;
+
+    const promptGreyGuide = `
+      TASK: 3-COLOR GUIDE STYLE
+      - Create a specific style of coloring page.
+      
+      PALETTE:
+      1. **WHITE**: Background.
+      2. **GREY**: The main drawing/subject outlines. (Thin, light-to-mid grey).
+      3. **BLACK**: Text/Handwriting ONLY. (Slightly thicker).
+      
+      USER CUSTOM INSTRUCTION (IMPORTANT OVERRIDE):
+      ${customInstruction ? `"${customInstruction}" - PRIORITIZE THIS INSTRUCTION.` : "None."}
+
+      RULES:
+      - **NO FILLS**: All interiors must be WHITE. Even dark areas (shadows, hair, clothing) must be OUTLINED in GREY.
+      - **FIDELITY**: Keep the subjects exactly as they are. Do not cartoonize real photos.
+      - **TEXT**: If there is text, make it BLACK. If no text, just use GREY for the drawing.
+    `;
+
+    const [withText, withoutText, cleanedUp] = await Promise.all([
+      generateImage(ai, workingBase64, mimeType, promptTrace),
+      generateImage(ai, workingBase64, mimeType, promptNoText),
+      generateImage(ai, workingBase64, mimeType, promptGreyGuide)
+    ]);
+
+    return { withText, withoutText, cleanedUp };
+
+  } catch (error) {
+    console.error("Gemini API Error:", error);
+    throw error;
+  }
 };
